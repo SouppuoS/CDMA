@@ -1,5 +1,6 @@
 # CDMA
 Generate weights for Differential Microphone Arrays (CDMA)[1] in python. Allow to design cardioid, supercardioid or hypercardioid beamformer.  
+生成圆阵列DMA算法的波束成形权重，具体设计参考Jacob的Design of circular differential microphone arrays。
 ![cardioid2nd](beampattern.png)
 
 ## HOW TO USE
