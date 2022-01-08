@@ -32,11 +32,24 @@ class circular_microphone_arrays():
         self.steer    = np.exp(2j * np.pi * self.r / c \
                                   * _cos_degdif[...,None] * self.freq[None, None])  # [sa_bin x M x f_bin]
 
+    @classmethod
+    def theta_validation(
+        self,
+        theta: float,
+    ) -> float :
+        while theta < 0:
+            theta += 360.
+        while theta >= 360.:
+            theta -= 360.
+        return theta
+
     def get_steer(
         self,
         theta: float = 0    # theta: steer direction (degree)
-        ):
-        rad       = theta / 180. * np.pi
+    ) -> np.ndarray:
+        theta_val = self.theta_validation(theta)
+        print(f'LOG:: get steer from theta = {theta_val}')
+        rad       = theta_val / 180. * np.pi
         tgt_theta = np.argmin(np.abs(self.rad - rad))
         return self.steer[tgt_theta]    # [M x f_bin]
 
@@ -48,66 +61,67 @@ class CDMA():
         self,
         cma         : circular_microphone_arrays,
         sa          : float,                                # steer angle (distortless directgion)
-        symmetric   : np.ndarray,                           # symmetric constrain for the weight
-        sym_b       : np.ndarray                 = None,    # b part of symmetric constrain
+        sym         : np.ndarray                 = None,    # symmetric constrain for the weight, [C, M + 1]
         null_list   : list                       = [],      # list of null point (degree)
+        b           : np.ndarray                 = None,    # b for each point, [len(null_list) + 1]
         mic_mask    : list                       = [],      # list of microphone mask
-        min_norm    : bool                       = False,   # use minimum-norm filter
         ) -> None:
         self.cma        = cma
         self.null_list  = null_list
         self.mic_mask   = mic_mask
-        
-        _sy = symmetric[None, :, None] if len(symmetric.shape) == 1 else symmetric[..., None]
-        _sy = _sy.repeat(cma.f_bin, axis=-1).astype(np.float)
-        _eq = []
-        for d in [sa,] + self.null_list:
-            _eq.append(self.cma.get_steer(d))
-        _eq         = np.array(_eq)
-        _eq         = np.concatenate((_eq, _sy), axis=0)            # [N x M x f_bin], N : number of constrains
+        self.sa         = sa + 360 if sa < 0 else sa
+        self.b          = b
+        self.sym        = self.build_sym(self.cma.M, self.sa) if sym is None else sym
+
+        self.calc_weight()
+    
+    def calc_weight(self):
+        _eq     = np.array([self.cma.get_steer(d).conjugate() for d in [self.sa,] + self.null_list])
+        _b      = np.zeros((_eq.shape[0], 1, _eq.shape[-1]))    # [N x 1 x f_bin]
+        _b[0]   = 1.
+
+        if self.b is not None:
+            _b  = self.null_b[:, None, None].repeat(_eq.shape[-1], axis=-1)
+
+        if self.sym is not None:
+            _sy = self.sym[..., None].repeat(self.cma.f_bin, axis=-1).astype(np.float)
+            _eq = np.concatenate((_eq, _sy[..., :-1, :]), axis=0)  # [N x M x f_bin], N : number of constrains
+            _b  = np.concatenate((_b, _sy[..., [-1], :]), axis=0)  # [N x 1 x f_bin], N : number of constrains
+
+        # DC part
         _eq[...,0]  = np.eye(self.cma.M)[:_eq.shape[0]]
-        _b          = np.zeros((_eq.shape[0], 1, _eq.shape[-1]))    # [N x 1 x f_bin]
-        _b[0]       = 1.
         _b[...,0]   = 1. / self.cma.M
 
-        if sym_b is not None:
-            n_sym_b = sym_b.shape[-1]
-            for i in range(n_sym_b):
-                _b[- n_sym_b + i] = sym_b[i]
-        
-        if len(mic_mask) > 0:
-            _eq = _eq[mic_mask]
-            _eq = _eq[:, mic_mask]
-            _b  = _b[mic_mask]
-
-        if min_norm:
+        # weight, [f_bin x M x 1]
+        if _eq.shape[0] < _eq.shape[1]:
+            # NMS
             _mAA        = np.einsum('ijk,ljk->kil', _eq, _eq.conjugate())  # [f_bin x N x N]
             self.weight = np.einsum('ijk,kil,lnk->kjn', _eq.conjugate(), np.linalg.inv(_mAA), _b)
+
+        elif _eq.shape[0] == _eq.shape[1]:
+            self.weight = np.linalg.solve(_eq.transpose(2, 0, 1), _b.transpose(2, 0, 1))
+
         else:
-            # [f_bin x M x 1]
-            self.weight = np.linalg.solve(_eq.conjugate().transpose(2, 0, 1), _b.transpose(2, 0, 1))
-    
+            raise NotImplemented
+
+    @classmethod
+    def build_sym(
+        self,
+        M           : int,              # M         : number of microphones
+        sa          : float = 0,        # steer angle (distortless directgion)
+    ) -> np.ndarray:
+        sa       = sa + 360 if sa < 0 else sa
+        deg_cand = np.array([v * 360 / M for v in range(M)])
+        tgt_dir  = np.argmin(np.abs(deg_cand - sa))
+
+        _sy = np.zeros((M // 2 - 1, M + 1), dtype=np.float)
+        for i in range(1, M // 2):
+            _sy[i - 1, i], _sy[i - 1, M - i] = 1., -1.
+        _sy_r = np.concatenate((np.roll(_sy[:, :-1], shift=tgt_dir, axis=1), _sy[:, [-1]]), axis=1)
+        return _sy_r
+
     def get_weight(self):
         return self.weight
 
-def Beampattern(
-    cma     : circular_microphone_arrays,
-    w       : np.ndarray,                           # [f_bin x M x 1]
-    freq    : int = 0                               # target freq
-):
-    tgt_f_bin = np.argmin(np.abs(cma.freq - freq))
-    # [sa_bin x M] x [M x 1]
-    a_map     = np.einsum('ij,jk->ik', cma.steer[..., tgt_f_bin], w[tgt_f_bin].conjugate())
-    plt.subplot(1,1,1, polar=True)
-    plt.plot(np.linspace(0, 2 * np.pi, 360), 10 * np.log10(np.abs(a_map).reshape(-1) + 1e-2))
-    plt.title('4-MIC CDMA 2nd-cardioid\nsteer angle = 90 deg null point at 180 deg and 270 deg')
-    plt.tight_layout()
-    plt.savefig('beampattern')
-
 if __name__ == "__main__":
-    cma     = circular_microphone_arrays(M=4)
-    cdma    = CDMA(cma, sa=90, null_list=[225], 
-                   symmetric=np.array([[-1, 0, 1, 0]]),
-                   sym_b=np.array([[0]]), min_norm=True)
-    Beampattern(cma, cdma.get_weight(), freq=1000)
     pass
