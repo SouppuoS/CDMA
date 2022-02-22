@@ -6,7 +6,6 @@ Reference:
 """
 
 import numpy as np
-import matplotlib.pyplot as plt
 
 c = 340
 
@@ -17,7 +16,7 @@ class circular_microphone_arrays():
         fs      : int       = 8000,     # fs        : sample rate
         f_bin   : int       = 256,      # f_bin     : number of freq bins
         sa_bin  : int       = 360,      # sa_bin    : number of steer angle
-        ) -> None:
+    ) -> None:
         self.r        = r / 100.        # cm -> m
         self.M        = M
         self.fs       = fs
@@ -27,7 +26,7 @@ class circular_microphone_arrays():
 
         self.phi      = np.arange(0, self.M, 1) * 2 * np.pi / self.M        
         self.rad      = np.arange(0, 360, 360. / self.sa_bin) * np.pi / 180.
-        self.freq     = np.arange(0, self.fs / 2, self.fs / 2 / self.f_bin)         # [f_bin]
+        self.freq     = np.linspace(0, self.fs / 2, self.f_bin)                     # [f_bin]
         _cos_degdif   = np.cos(self.rad[:,None] - self.phi[None])                   # [sa_bin x M]
         self.steer    = np.exp(2j * np.pi * self.r / c \
                                   * _cos_degdif[...,None] * self.freq[None, None])  # [sa_bin x M x f_bin]
@@ -48,9 +47,9 @@ class circular_microphone_arrays():
         theta: float = 0    # theta: steer direction (degree)
     ) -> np.ndarray:
         theta_val = self.theta_validation(theta)
-        print(f'LOG:: get steer from theta = {theta_val}')
         rad       = theta_val / 180. * np.pi
         tgt_theta = np.argmin(np.abs(self.rad - rad))
+        print(f'LOG:: get steer from theta = {theta_val} - tgt = {tgt_theta}')
         return self.steer[tgt_theta]    # [M x f_bin]
 
 class CDMA():
@@ -65,7 +64,7 @@ class CDMA():
         null_list   : list                       = [],      # list of null point (degree)
         b           : np.ndarray                 = None,    # b for each point, [len(null_list) + 1]
         mic_mask    : list                       = [],      # list of microphone mask
-        ) -> None:
+    ) -> None:
         self.cma        = cma
         self.null_list  = null_list
         self.mic_mask   = mic_mask
@@ -75,7 +74,9 @@ class CDMA():
 
         self.calc_weight()
     
-    def calc_weight(self):
+    def calc_weight(
+        self,
+    ) -> None:
         _eq     = np.array([self.cma.get_steer(d).conjugate() for d in [self.sa,] + self.null_list])
         _b      = np.zeros((_eq.shape[0], 1, _eq.shape[-1]))    # [N x 1 x f_bin]
         _b[0]   = 1.
@@ -95,6 +96,7 @@ class CDMA():
         # weight, [f_bin x M x 1]
         if _eq.shape[0] < _eq.shape[1]:
             # NMS
+            print('LOG:: NMS mode')
             _mAA        = np.einsum('ijk,ljk->kil', _eq, _eq.conjugate())  # [f_bin x N x N]
             self.weight = np.einsum('ijk,kil,lnk->kjn', _eq.conjugate(), np.linalg.inv(_mAA), _b)
 
@@ -120,8 +122,16 @@ class CDMA():
         _sy_r = np.concatenate((np.roll(_sy[:, :-1], shift=tgt_dir, axis=1), _sy[:, [-1]]), axis=1)
         return _sy_r
 
-    def get_weight(self):
+    def get_weight(
+        self
+    ) -> np.ndarray:
         return self.weight
+    
+    def apply(
+        self, 
+        spec_x  : np.ndarray,   # input signal, [M x f_bin x N]
+    ) -> np.ndarray:
+        return np.einsum('mfn,fmi->fni', spec_x, self.get_weight().conjugate())[..., 0]
 
 if __name__ == "__main__":
     pass
