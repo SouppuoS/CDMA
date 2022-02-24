@@ -50,6 +50,22 @@ class circular_microphone_arrays():
             theta -= 360.
         return theta
 
+    @classmethod
+    def build_sym(
+        self,
+        M           : int,              # M         : number of microphones
+        sa          : float = 0,        # steer angle (distortless directgion)
+    ) -> np.ndarray:
+        sa       = sa + 360 if sa < 0 else sa
+        deg_cand = np.array([v * 360 / M for v in range(M)])
+        tgt_dir  = np.argmin(np.abs(deg_cand - sa))
+
+        _sy = np.zeros((M // 2 - 1, M + 1), dtype=np.float)
+        for i in range(1, M // 2):
+            _sy[i - 1, i], _sy[i - 1, M - i] = 1., -1.
+        _sy_r = np.concatenate((np.roll(_sy[:, :-1], shift=tgt_dir, axis=1), _sy[:, [-1]]), axis=1)
+        return _sy_r
+
     def get_steer(
         self,
         theta: float = 0    # theta: steer direction (degree)
@@ -96,7 +112,7 @@ class CDMA(FixedBeamformor):
         self.mic_mask   = mic_mask
         self.sa         = sa + 360 if sa < 0 else sa
         self.b          = b
-        self.sym        = self.build_sym(self.cma.M, self.sa) if sym is None else sym
+        self.sym        = self.cma.build_sym(self.cma.M, self.sa) if sym is None else sym
 
         self.calc_weight()
     
@@ -110,10 +126,9 @@ class CDMA(FixedBeamformor):
         if self.b is not None:
             _b  = self.null_b[:, None, None].repeat(_eq.shape[-1], axis=-1)
 
-        if self.sym is not None:
-            _sy = self.sym[..., None].repeat(self.cma.f_bin, axis=-1).astype(np.float)
-            _eq = np.concatenate((_eq, _sy[..., :-1, :]), axis=0)  # [N x M x f_bin], N : number of constrains
-            _b  = np.concatenate((_b, _sy[..., [-1], :]), axis=0)  # [N x 1 x f_bin], N : number of constrains
+        _sy = self.sym[..., None].repeat(self.cma.f_bin, axis=-1).astype(np.float)
+        _eq = np.concatenate((_eq, _sy[..., :-1, :]), axis=0)  # [N x M x f_bin], N : number of constrains
+        _b  = np.concatenate((_b, _sy[..., [-1], :]), axis=0)  # [N x 1 x f_bin], N : number of constrains
 
         # DC part
         _eq[...,0]  = np.eye(self.cma.M)[:_eq.shape[0]]
@@ -131,22 +146,6 @@ class CDMA(FixedBeamformor):
 
         else:
             raise NotImplemented
-
-    @classmethod
-    def build_sym(
-        self,
-        M           : int,              # M         : number of microphones
-        sa          : float = 0,        # steer angle (distortless directgion)
-    ) -> np.ndarray:
-        sa       = sa + 360 if sa < 0 else sa
-        deg_cand = np.array([v * 360 / M for v in range(M)])
-        tgt_dir  = np.argmin(np.abs(deg_cand - sa))
-
-        _sy = np.zeros((M // 2 - 1, M + 1), dtype=np.float)
-        for i in range(1, M // 2):
-            _sy[i - 1, i], _sy[i - 1, M - i] = 1., -1.
-        _sy_r = np.concatenate((np.roll(_sy[:, :-1], shift=tgt_dir, axis=1), _sy[:, [-1]]), axis=1)
-        return _sy_r
 
 class DS(FixedBeamformor):
     """Delay and Sum
@@ -173,26 +172,50 @@ class RSD(FixedBeamformor):
         self,
         cma         : circular_microphone_arrays,
         sa          : float,                                # steer angle (distortless directgion)
-        mode        : str = 'sphere',                       # diffuse noise mode, `sphere` or `cylinder`
-        eps         : float = 0,                            # eps on Gamma_dn
+        mode        : str                   = 'sphere',     # diffuse noise mode, `sphere` or `cylinder`
+        sym         : np.ndarray            = None,         # symmetric constrain for the weight, [C, M + 1]
+        sym_flag    : bool                  = False,        # add symmetry constraint or not
+        eps = 0.,                                           # eps on Gamma_dn, could be `float` or `np.ndarray` for [f_bin x 1 x 1]
         ) -> None:
         self.cma        = cma
         self.sa         = sa + 360 if sa < 0 else sa
         self.g_dn_mode  = mode
         self.eps        = eps
+        self.sym_flag   = sym_flag
+        self.sym        = self.cma.build_sym(self.cma.M, self.sa) if sym is None else sym
         
         self.calc_weight()
 
     def calc_weight(
         self,
     ) -> None:
-        sv          = self.cma.get_steer(self.sa)                                       # [M x f_bin]
-        _g_v_inv    = np.linalg.inv(self.eps * np.eye(self.cma.M)[None] + (self.cma.g_dn_sphere \
-                      if self.g_dn_mode == 'sphere' else self.cma.g_dn_cylinder))       # [f_bin x M x M]
-        _num        = np.einsum('fmn,imf->fni', _g_v_inv, sv[None])                     # [f_bin x M x 1]
-        _den        = np.einsum('fmi,lmf->fil', _num, sv[None].conjugate())             # [f_bin x 1 x 1]
-        _num[0]     = 1 / self.cma.M                                                    # set DC part to zero
-        self.weight = _num / _den
+        _g_v = self.eps * np.eye(self.cma.M)[None] + (self.cma.g_dn_sphere \
+               if self.g_dn_mode == 'sphere' else self.cma.g_dn_cylinder)                   # [f_bin x M x M]
+        if not self.sym_flag:
+            # without symmetry constraint
+            sv          = self.cma.get_steer(self.sa)                                       # [M x f_bin]
+            _num        = np.einsum('fmn,imf->fni', np.linalg.inv(_g_v), sv[None])          # [f_bin x M x 1]
+            _den        = np.einsum('fmi,lmf->fil', _num, sv[None].conjugate())             # [f_bin x 1 x 1]
+            _num[0]     = 1 / self.cma.M                                                    # set DC part to zero
+            self.weight = _num / _den
+        
+        else:
+            # without symmetry constraint
+            _eq     = np.array([self.cma.get_steer(self.sa).conjugate()])
+            _b      = np.zeros((_eq.shape[0], 1, _eq.shape[-1]))    # [N x 1 x f_bin]
+            _b[0]   = 1.
+
+            _sy     = self.sym[..., None].repeat(self.cma.f_bin, axis=-1).astype(np.float)
+            _eq     = np.concatenate((_eq, _sy[..., :-1, :]), axis=0)  # [N x M x f_bin], N : number of constrains
+            _b      = np.concatenate((_b, _sy[..., [-1], :]), axis=0)  # [N x 1 x f_bin], N : number of constrains
+
+            # DC part
+            _eq[...,0]  = np.eye(self.cma.M)[:_eq.shape[0]]
+            _b[...,0]   = 1. / self.cma.M
+
+            _gd_inv     = np.linalg.solve(_g_v, _eq.conjugate().transpose(2, 1, 0))     # \Gamma^{-1}D^*, [f_bin x M x N]
+            _d_gd_inv   = np.einsum('nmf,fml->fnl', _eq, _gd_inv)                       # D\Gamma^{-1}D^*, [f_bin x N x N]
+            self.weight = np.einsum('fmn,fnl,lif->fmi', _gd_inv, np.linalg.inv(_d_gd_inv), _b)
 
 if __name__ == "__main__":
     pass
