@@ -20,5 +20,9 @@ In `test.py`, an example demonstrates how to apply the CDMA build before on spee
 The specgram of clean utterances, mixture and enhanced signal are shown below.  
 ![speechenhance](enhanced.png)
 
+## AVAILABLE CDMA TYPE
+- Any order Hypercardioid, Supercardioid or Cardioid CDMA
+- Superdirective, Robust Superdirective w/o symmetry or null point constraint
+  
 ## Reference:  
 [1] Benesty, Jacob, Jingdong Chen, and Israel Cohen. Design of circular differential microphone arrays. Vol. 12. Berlin, Germany:: Springer, 2015.

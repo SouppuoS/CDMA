@@ -80,11 +80,20 @@ class FixedBeamformor():
     def __init__(
         self,
         ) -> None:
+        self.flg_calc_weight = True
+
+    def calc_weight(
+        self
+    ) -> None:
         pass
 
     def get_weight(
-        self
+        self,
+        recalc : bool = False
     ) -> np.ndarray:
+        if self.flg_calc_weight or recalc:
+            self.calc_weight()
+            self.flg_calc_weight = False
         # weight, [f_bin x M x 1]
         return self.weight
     
@@ -107,18 +116,17 @@ class CDMA(FixedBeamformor):
         b           : np.ndarray                 = None,    # b for each point, [len(null_list) + 1]
         mic_mask    : list                       = [],      # list of microphone mask
     ) -> None:
+        super(CDMA, self).__init__()
         self.cma        = cma
         self.null_list  = null_list
         self.mic_mask   = mic_mask
         self.sa         = sa + 360 if sa < 0 else sa
         self.b          = b
         self.sym        = self.cma.build_sym(self.cma.M, self.sa) if sym is None else sym
-
-        self.calc_weight()
     
-    def calc_weight(
+    def build_eq(
         self,
-    ) -> None:
+    ) -> tuple:
         _eq     = np.array([self.cma.get_steer(d).conjugate() for d in [self.sa,] + self.null_list])
         _b      = np.zeros((_eq.shape[0], 1, _eq.shape[-1]))    # [N x 1 x f_bin]
         _b[0]   = 1.
@@ -133,8 +141,12 @@ class CDMA(FixedBeamformor):
         # DC part
         _eq[...,0]  = np.eye(self.cma.M)[:_eq.shape[0]]
         _b[...,0]   = 1. / self.cma.M
+        return _eq, _b
 
-        # weight, [f_bin x M x 1]
+    def calc_weight(
+        self,
+    ) -> None:
+        _eq, _b = self.build_eq()
         if _eq.shape[0] < _eq.shape[1]:
             # NMS
             print('LOG:: NMS mode')
@@ -157,15 +169,13 @@ class DS(FixedBeamformor):
         ) -> None:
         self.cma        = cma
         self.sa         = sa + 360 if sa < 0 else sa
-        
-        self.calc_weight()
 
     def calc_weight(
         self,
     ) -> None:
         self.weight = self.cma.get_steer(self.sa).T[...,None] / self.cma.M
 
-class RSD(FixedBeamformor):
+class RSD(CDMA):
     """Robust Superdirective beamforming
     """
     def __init__(
@@ -173,25 +183,21 @@ class RSD(FixedBeamformor):
         cma         : circular_microphone_arrays,
         sa          : float,                                # steer angle (distortless directgion)
         mode        : str                   = 'sphere',     # diffuse noise mode, `sphere` or `cylinder`
-        sym         : np.ndarray            = None,         # symmetric constrain for the weight, [C, M + 1]
         sym_flag    : bool                  = False,        # add symmetry constraint or not
         eps = 0.,                                           # eps on Gamma_dn, could be `float` or `np.ndarray` for [f_bin x 1 x 1]
+        **kwargs,
         ) -> None:
-        self.cma        = cma
-        self.sa         = sa + 360 if sa < 0 else sa
+        super(RSD, self).__init__(cma, sa, **kwargs)
         self.g_dn_mode  = mode
         self.eps        = eps
-        self.sym_flag   = sym_flag
-        self.sym        = self.cma.build_sym(self.cma.M, self.sa) if sym is None else sym
-        
-        self.calc_weight()
+        self.flg_sym    = sym_flag
 
     def calc_weight(
         self,
     ) -> None:
         _g_v = self.eps * np.eye(self.cma.M)[None] + (self.cma.g_dn_sphere \
                if self.g_dn_mode == 'sphere' else self.cma.g_dn_cylinder)                   # [f_bin x M x M]
-        if not self.sym_flag:
+        if not self.flg_sym:
             # without symmetry constraint
             sv          = self.cma.get_steer(self.sa)                                       # [M x f_bin]
             _num        = np.einsum('fmn,imf->fni', np.linalg.inv(_g_v), sv[None])          # [f_bin x M x 1]
@@ -201,18 +207,7 @@ class RSD(FixedBeamformor):
         
         else:
             # without symmetry constraint
-            _eq     = np.array([self.cma.get_steer(self.sa).conjugate()])
-            _b      = np.zeros((_eq.shape[0], 1, _eq.shape[-1]))    # [N x 1 x f_bin]
-            _b[0]   = 1.
-
-            _sy     = self.sym[..., None].repeat(self.cma.f_bin, axis=-1).astype(np.float)
-            _eq     = np.concatenate((_eq, _sy[..., :-1, :]), axis=0)  # [N x M x f_bin], N : number of constrains
-            _b      = np.concatenate((_b, _sy[..., [-1], :]), axis=0)  # [N x 1 x f_bin], N : number of constrains
-
-            # DC part
-            _eq[...,0]  = np.eye(self.cma.M)[:_eq.shape[0]]
-            _b[...,0]   = 1. / self.cma.M
-
+            _eq, _b     = self.build_eq()
             _gd_inv     = np.linalg.solve(_g_v, _eq.conjugate().transpose(2, 1, 0))     # \Gamma^{-1}D^*, [f_bin x M x N]
             _d_gd_inv   = np.einsum('nmf,fml->fnl', _eq, _gd_inv)                       # D\Gamma^{-1}D^*, [f_bin x N x N]
             self.weight = np.einsum('fmn,fnl,lif->fmi', _gd_inv, np.linalg.inv(_d_gd_inv), _b)
