@@ -6,7 +6,7 @@ import pyroomacoustics as pra
 import scipy.signal as ss
 import soundfile as sf
 
-from cdma import circular_microphone_arrays, CDMA
+from cdma import circular_microphone_arrays, CDMA, DS, RSD
 
 def Beampattern(
     cma     : circular_microphone_arrays,
@@ -24,21 +24,23 @@ def Beampattern_allfreq(
     a_map = np.einsum('dmf,fmi->dfi', cma.steer, w.conjugate())
     return a_map[..., 0]
 
-def test_beampattern(cma, cdma):
-    a_map = Beampattern(cma, cdma.get_weight(), freq=2687)
+def test_beampattern(cma, bf):
+    a_map = Beampattern(cma, bf.get_weight(), freq=2000)
     plt.figure(figsize=(5,5))
     plt.subplot(1,1,1, polar=True)
-    plt.plot(np.linspace(0, 2 * np.pi, 360), 10 * np.log10(np.clip(np.abs(a_map).reshape(-1), a_min=1e-2, a_max=None)))
+    plt.plot(np.linspace(0, 2 * np.pi, cma.sa_bin), 20 * np.log10(np.clip(np.abs(a_map).reshape(-1), a_min=1e-2, a_max=None)))
     plt.ylim((-20, 0))
     plt.yticks([0, -5, -10, -15, -20], [0, -5, -10, -15, -20])
     plt.tight_layout()
     plt.savefig('beampattern')
 
-    a_map_af = Beampattern_allfreq(cma, cdma.get_weight()).transpose(1, 0)
+    a_map_af = Beampattern_allfreq(cma, bf.get_weight()).transpose(1, 0)
     plt.figure()
-    plt.imshow(10 * np.log10(np.clip(np.abs(a_map_af), a_min=1e-2, a_max=None)))
+    plt.imshow(20 * np.log10(np.clip(np.abs(a_map_af[1:]), a_min=1e-2, a_max=None)), aspect='auto')
+    plt.colorbar()
     plt.ylabel('f_bin')
     plt.xlabel('Degree')
+    plt.tight_layout()
     plt.savefig('beampattern_allfreq')
 
 def test_enhance(
@@ -98,6 +100,13 @@ def test_enhance(
 if __name__ == '__main__':
     sa      = 180
     cma     = circular_microphone_arrays(M=4, f_bin=129, r=1, fs=16000)
+
     cdma    = CDMA(cma, sa=sa, null_list=[sa + 72, sa + 144])
     test_beampattern(cma, cdma)
     test_enhance(cdma)
+
+    # ds      = DS(cma, sa=sa)
+    # test_beampattern(cma, ds)
+
+    # sd      = RSD(cma, sa=sa, mode='sphere', eps=.0)
+    # test_beampattern(cma, sd)

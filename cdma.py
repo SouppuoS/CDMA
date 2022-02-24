@@ -24,12 +24,20 @@ class circular_microphone_arrays():
         self.f_bin    = f_bin
         self.sa_bin   = sa_bin
 
+        # steer
         self.phi      = np.arange(0, self.M, 1) * 2 * np.pi / self.M        
         self.rad      = np.arange(0, 360, 360. / self.sa_bin) * np.pi / 180.
         self.freq     = np.linspace(0, self.fs / 2, self.f_bin)                     # [f_bin]
+        self.freq[0]  = 1                                                           # set the first freq to 1Hz to avoid singular matrix
         _cos_degdif   = np.cos(self.rad[:,None] - self.phi[None])                   # [sa_bin x M]
         self.steer    = np.exp(2j * np.pi * self.r / c \
                                   * _cos_degdif[...,None] * self.freq[None, None])  # [sa_bin x M x f_bin]
+
+        # gamma_dn
+        _dij    = np.arange(0, self.M, 1)[None] - np.arange(0, self.M, 1)[:, None]  # delta_{ij}, [M x M]
+        _delta  = 2 * self.r * np.sin(np.pi * _dij / self.M)
+        self.g_dn_sphere   = np.sinc(2 * np.pi * self.freq[:, None, None] * _delta[None] / c)
+        self.g_dn_cylinder = np.i0(2 * np.pi * self.freq[:, None, None] * _delta[None] / c)
 
     @classmethod
     def theta_validation(
@@ -52,7 +60,25 @@ class circular_microphone_arrays():
         print(f'LOG:: get steer from theta = {theta_val} - tgt = {tgt_theta}')
         return self.steer[tgt_theta]    # [M x f_bin]
 
-class CDMA():
+class FixedBeamformor():
+    def __init__(
+        self,
+        ) -> None:
+        pass
+
+    def get_weight(
+        self
+    ) -> np.ndarray:
+        # weight, [f_bin x M x 1]
+        return self.weight
+    
+    def apply(
+        self, 
+        spec_x  : np.ndarray,   # input signal, [M x f_bin x N]
+    ) -> np.ndarray:
+        return np.einsum('mfn,fmi->fni', spec_x, self.get_weight().conjugate())[..., 0]
+
+class CDMA(FixedBeamformor):
     """Circular Differential Microphone Arrays (CDMA)
     The order of CDMA depend on the number of null point in null_list.
     """
@@ -122,16 +148,51 @@ class CDMA():
         _sy_r = np.concatenate((np.roll(_sy[:, :-1], shift=tgt_dir, axis=1), _sy[:, [-1]]), axis=1)
         return _sy_r
 
-    def get_weight(
-        self
-    ) -> np.ndarray:
-        return self.weight
-    
-    def apply(
-        self, 
-        spec_x  : np.ndarray,   # input signal, [M x f_bin x N]
-    ) -> np.ndarray:
-        return np.einsum('mfn,fmi->fni', spec_x, self.get_weight().conjugate())[..., 0]
+class DS(FixedBeamformor):
+    """Delay and Sum
+    """
+    def __init__(
+        self,
+        cma         : circular_microphone_arrays,
+        sa          : float,                                # steer angle (distortless directgion)
+        ) -> None:
+        self.cma        = cma
+        self.sa         = sa + 360 if sa < 0 else sa
+        
+        self.calc_weight()
+
+    def calc_weight(
+        self,
+    ) -> None:
+        self.weight = self.cma.get_steer(self.sa).T[...,None] / self.cma.M
+
+class RSD(FixedBeamformor):
+    """Robust Superdirective beamforming
+    """
+    def __init__(
+        self,
+        cma         : circular_microphone_arrays,
+        sa          : float,                                # steer angle (distortless directgion)
+        mode        : str = 'sphere',                       # diffuse noise mode, `sphere` or `cylinder`
+        eps         : float = 0,                            # eps on Gamma_dn
+        ) -> None:
+        self.cma        = cma
+        self.sa         = sa + 360 if sa < 0 else sa
+        self.g_dn_mode  = mode
+        self.eps        = eps
+        
+        self.calc_weight()
+
+    def calc_weight(
+        self,
+    ) -> None:
+        sv          = self.cma.get_steer(self.sa)                                       # [M x f_bin]
+        _g_v_inv    = np.linalg.inv(self.eps * np.eye(self.cma.M)[None] + (self.cma.g_dn_sphere \
+                      if self.g_dn_mode == 'sphere' else self.cma.g_dn_cylinder))       # [f_bin x M x M]
+        _num        = np.einsum('fmn,imf->fni', _g_v_inv, sv[None])                     # [f_bin x M x 1]
+        _den        = np.einsum('fmi,lmf->fil', _num, sv[None].conjugate())             # [f_bin x 1 x 1]
+        _num[0]     = 1 / self.cma.M                                                    # set DC part to zero
+        self.weight = _num / _den
 
 if __name__ == "__main__":
     pass
