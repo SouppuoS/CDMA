@@ -26,6 +26,8 @@ The specgram of clean utterances, mixture and enhanced signal are shown below.
 ## AVAILABLE CDMA TYPE  
 - Any order Hypercardioid, Supercardioid or Cardioid CDMA
 - Superdirective, Robust Superdirective with symmetry and null point constraint
+- GSC
   
 ## Reference:  
 [1] Benesty, Jacob, Jingdong Chen, and Israel Cohen. Design of circular differential microphone arrays. Vol. 12. Berlin, Germany:: Springer, 2015.
+[2] Benesty, Jacob, Jingdong Chen, and Yiteng Huang. Microphone array signal processing. Vol. 1. Springer Science & Business Media, 2008.

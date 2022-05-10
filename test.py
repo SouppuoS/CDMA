@@ -6,7 +6,7 @@ import pyroomacoustics as pra
 import scipy.signal as ss
 import soundfile as sf
 
-from cdma import circular_microphone_arrays, CDMA, DS, RSD
+from cdma import circular_microphone_arrays, CDMA, DS, RSD, GSC
 
 def Beampattern(
     cma     : circular_microphone_arrays,
@@ -110,3 +110,6 @@ if __name__ == '__main__':
 
     # sd      = RSD(cma, sa=sa, mode='sphere', eps=.0)
     # test_beampattern(cma, sd)
+
+    # gsc     = GSC(cma, sa=sa, null_list=[sa + 135])
+    # test_enhance(gsc)

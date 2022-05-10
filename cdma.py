@@ -3,6 +3,7 @@ Implement of Circular Differential Microphone Arrays (CDMA)
 
 Reference: 
 [1] Benesty, Jacob, Jingdong Chen, and Israel Cohen. Design of circular differential microphone arrays. Vol. 12. Berlin, Germany:: Springer, 2015.
+[2] Benesty, Jacob, Jingdong Chen, and Yiteng Huang. Microphone array signal processing. Vol. 1. Springer Science & Business Media, 2008.
 """
 
 import numpy as np
@@ -102,6 +103,33 @@ class FixedBeamformor():
         spec_x  : np.ndarray,   # input signal, [M x f_bin x N]
     ) -> np.ndarray:
         return np.einsum('mfn,fmi->fni', spec_x, self.get_weight().conjugate())[..., 0]
+
+class AdaptiveBeamformor():
+    def __init__(
+        self
+    ) -> None:
+        pass
+
+    def get_Rxx(
+        self,
+        spec_x  : np.ndarray,
+    ) -> np.ndarray:
+        # Rxx, [f_bin x M x M]
+        return np.einsum('mfn,lfn->fml', spec_x, spec_x.conjugate())
+    
+    def calc_weight(
+        self,
+        spec_x  : np.ndarray,
+    ) -> np.ndarray:
+        # weight, [f_bin x M x 1]
+        pass
+
+    def apply(
+        self,
+        spec_x  : np.ndarray,
+    ) -> np.ndarray:
+        print('LOG:: Adaptive')
+        return np.einsum('mfn,fmi->fni', spec_x, self.calc_weight(spec_x).conjugate())[..., 0]
 
 class CDMA(FixedBeamformor):
     """Circular Differential Microphone Arrays (CDMA)
@@ -211,6 +239,36 @@ class RSD(CDMA):
             _gd_inv     = np.linalg.solve(_g_v, _eq.conjugate().transpose(2, 1, 0))     # \Gamma^{-1}D^*, [f_bin x M x N]
             _d_gd_inv   = np.einsum('nmf,fml->fnl', _eq, _gd_inv)                       # D\Gamma^{-1}D^*, [f_bin x N x N]
             self.weight = np.einsum('fmn,fnl,lif->fmi', _gd_inv, np.linalg.inv(_d_gd_inv), _b)
+
+class GSC(AdaptiveBeamformor, CDMA):
+    """Generalized Sidelobe Canceler
+    """
+    def __init__(
+        self,
+        cma     : circular_microphone_arrays,
+        inv_eps : float                         = 1e-6,
+        *args,
+        **kwargs) -> None:
+        AdaptiveBeamformor.__init__(self)
+        CDMA.__init__(self, cma, *args, **kwargs)
+        
+        self.inv_eps = inv_eps
+
+    def calc_weight(
+        self,
+        spec_x  : np.ndarray,
+    ) -> None:
+        _eq, _b     = self.build_eq()
+        _Rxx        = self.get_Rxx(spec_x)
+        N, M, _     = _eq.shape
+        _mAA        = np.einsum('ijk,ljk->kil', _eq, _eq.conjugate())  # [f_bin x N x N]
+        _w_dma      = np.einsum('ijk,kil,lnk->kjn', _eq.conjugate(), np.linalg.inv(_mAA), _b)
+        _proj       = np.einsum('ijk,kil,lnk->kjn', _eq.conjugate(), np.linalg.inv(_mAA), _eq)
+        _bc         = (np.eye(M) - _proj)[..., :N]
+        _bcRxxbcT   = np.einsum('fmn,fmm,fml->fnl', _bc.conjugate(), _Rxx, _bc)
+        _w_gsc      = np.linalg.solve(_bcRxxbcT + self.inv_eps * np.eye(N)[None], 
+                                      np.einsum('fmn,fmm,fml->fnl', _bc.conjugate(), _Rxx, _w_dma))
+        return _w_dma - np.einsum('fmn,fnl->fml', _bc, _w_gsc)
 
 if __name__ == "__main__":
     pass
